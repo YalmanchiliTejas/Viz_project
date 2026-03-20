@@ -1,7 +1,6 @@
 """
 Background thread that runs the SWE solver continuously at reduced resolution
-for interactive preview.  Emits frame data every ~50 ms of simulation time
-so the GUI can update in real-time.
+for interactive preview.
 """
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -21,8 +20,8 @@ class LiveSimWorker(QThread):
         self._running = True
 
         # Reduced resolution for real-time performance
-        self.live_nx = min(config.nx, 192)
-        self.live_ny = min(config.ny, 96)
+        self.live_nx = min(config.nx, config.live_preview_nx)
+        self.live_ny = min(config.ny, config.live_preview_ny)
         self.live_dx = config.domain_width / self.live_nx
         self.live_dy = config.domain_height / self.live_ny
 
@@ -34,7 +33,11 @@ class LiveSimWorker(QThread):
             cfg = self.config
             backend = init_taichi(cfg.use_gpu)
             self.status.emit(
-                f"Live preview ({backend}) — {self.live_nx}×{self.live_ny}")
+                "Live preview "
+                f"({backend}) — {self.live_nx}×{self.live_ny}. "
+                "Showing low-resolution versions of the selected layers "
+                "before the full simulation runs."
+            )
 
             # Build bed at preview resolution
             live_cfg = SimConfig(
@@ -52,9 +55,10 @@ class LiveSimWorker(QThread):
             )
             solver.set_bed(b)
             solver.initialize()
+            self.frame_ready.emit(solver.get_frame_data())
 
-            # ~50 ms of sim-time per display update → ~20 FPS on fast HW
-            steps_per_display = max(1, int(0.05 / cfg.dt))
+            frame_interval = 1.0 / max(1, cfg.live_preview_max_fps)
+            steps_per_display = max(1, int(frame_interval / cfg.dt))
 
             while self._running:
                 for _ in range(steps_per_display):
