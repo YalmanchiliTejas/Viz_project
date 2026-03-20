@@ -1,8 +1,15 @@
 """
 QThread worker that runs the Taichi SWE simulation off the main thread.
 Emits progress signals so the GUI stays responsive.
+
+Key design note: Taichi CPU kernels hold the Python GIL while executing,
+which starves the Qt GUI thread.  We insert short ``time.sleep(0)`` calls
+between frames (and every few steps within a frame) so the OS scheduler
+can give the main thread enough time to repaint and stay responsive.
 """
+import gc
 import os
+import time
 import traceback
 
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -56,11 +63,22 @@ class SimulationWorker(QThread):
 
             self.status.emit("Running simulation…")
             for frame in range(num_frames):
-                for _ in range(steps):
+                for s in range(steps):
                     solver.step()
+                    # Yield GIL every ~10 steps so the GUI thread can repaint
+                    if s % 10 == 9:
+                        time.sleep(0)
+
                 data = solver.get_frame_data()
                 export_frame(data, cfg, frame, out)
                 self.progress.emit(frame + 1, num_frames)
+
+                # Yield GIL after each frame to keep GUI responsive
+                time.sleep(0)
+
+                # Periodic GC to prevent VTK/numpy object accumulation
+                if frame % 20 == 19:
+                    gc.collect()
 
             self.status.emit("Simulation complete.")
             self.finished_ok.emit(out, num_frames)

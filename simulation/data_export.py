@@ -43,5 +43,6 @@ def export_frame(frame_data: dict, config: SimConfig,
     writer = vtk.vtkXMLImageDataWriter()
     writer.SetFileName(path)
     writer.SetInputData(image)
+    writer.SetCompressorTypeToZLib()
     writer.Write()
     return path

@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
         self.sidebar.obstacles_changed.connect(self._on_obstacles_changed)
 
         self.slider_panel.frame_changed.connect(self._on_frame_changed)
+        self.slider_panel.playback_toggled.connect(self.pipeline.set_animating)
 
         # ---- kick-start VTK interactor ------------------------------ #
         iren = self.vtk_widget.GetRenderWindow().GetInteractor()

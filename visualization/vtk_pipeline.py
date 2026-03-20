@@ -63,6 +63,12 @@ class VTKPipeline:
         self._mouse_move_observer = None
         self._last_coordinate_text = "X: --  Y: --"
 
+        # Animation state — when True, expensive filters are skipped
+        self._animating = False
+        # Whether streamlines/contours were visible before animation started
+        self._pre_anim_streamlines = True
+        self._pre_anim_contours = True
+
         # color maps
         self._build_color_maps()
         # estimated scalar ranges – updated after first frame load
@@ -203,6 +209,34 @@ class VTKPipeline:
         self.clear()
 
     # ---- shared API -------------------------------------------------- #
+    def set_animating(self, playing: bool):
+        """Toggle animation mode — hides expensive layers during playback.
+
+        vtkStreamTracer and vtkContourFilter re-execute on every pipeline
+        update.  Hiding them during playback prevents the GPU/CPU from
+        recomputing streamlines for every single frame, which is the main
+        cause of playback freezes.
+        """
+        if playing == self._animating:
+            return
+        self._animating = playing
+        if playing:
+            # Save current visibility and hide expensive layers
+            if self.streamline_actor:
+                self._pre_anim_streamlines = self.streamline_actor.GetVisibility()
+                self.streamline_actor.SetVisibility(False)
+            if self.contour_actor:
+                self._pre_anim_contours = self.contour_actor.GetVisibility()
+                self.contour_actor.SetVisibility(False)
+        else:
+            # Restore visibility when paused
+            if self.streamline_actor:
+                self.streamline_actor.SetVisibility(self._pre_anim_streamlines)
+            if self.contour_actor:
+                self.contour_actor.SetVisibility(self._pre_anim_contours)
+            # Force a full pipeline update now that we're paused
+            self.renderer.GetRenderWindow().Render()
+
     def set_frame(self, idx: int):
         """Switch the reader to a different time frame and re-render."""
         if not self._load_frame(idx):
@@ -470,16 +504,16 @@ class VTKPipeline:
         seeds.SetPoint1(self.config.dx * 2, self.config.dy * 5, 0)
         seeds.SetPoint2(self.config.dx * 2,
                         self.config.domain_height - self.config.dy * 5, 0)
-        seeds.SetResolution(8 if self._is_live else 20)
+        seeds.SetResolution(8 if self._is_live else 12)
 
         tracer = vtk.vtkStreamTracer()
         tracer.SetInputConnection(assign_v.GetOutputPort())
         tracer.SetSourceConnection(seeds.GetOutputPort())
         tracer.SetMaximumPropagation(
-            self.config.domain_width if self._is_live else self.config.domain_width * 2)
+            self.config.domain_width if self._is_live else self.config.domain_width * 1.5)
         tracer.SetIntegrationDirectionToForward()
         tracer.SetIntegratorTypeToRungeKutta4()
-        tracer.SetMaximumNumberOfSteps(1200 if self._is_live else 4000)
+        tracer.SetMaximumNumberOfSteps(800 if self._is_live else 2000)
 
         z_offset = self.config.h0 * self.config.warp_scale + 0.25
         transform = vtk.vtkTransform()

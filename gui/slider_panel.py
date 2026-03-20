@@ -10,6 +10,7 @@ class SliderPanel(QWidget):
     """Horizontal bar with transport controls and a frame slider."""
 
     frame_changed = pyqtSignal(int)
+    playback_toggled = pyqtSignal(bool)      # True = playing, False = paused
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -94,6 +95,7 @@ class SliderPanel(QWidget):
             self._update_timer_interval()
             self._timer.start()
             self.btn_play.setText("⏸")
+        self.playback_toggled.emit(self._playing)
 
     def _step_forward(self):
         v = self.slider.value()
@@ -110,7 +112,7 @@ class SliderPanel(QWidget):
         if v < self.slider.maximum():
             self.slider.setValue(v + 1)
         else:
-            self._toggle_play()  # stop at end
+            self._toggle_play()  # stop at end (also emits playback_toggled)
 
     def _on_slider(self, value):
         self._update_labels(value)
