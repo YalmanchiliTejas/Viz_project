@@ -189,10 +189,12 @@ class VTKPipeline:
                         self.scalar_ranges[name] = (min(lo_c, lo_d),
                                                     max(hi_c, hi_d))
 
-            # apply updated range to mapper
+            # apply updated range to surface mapper
             if hasattr(self, "_surface_mapper"):
                 lo, hi = self.scalar_ranges[self.active_field]
                 self._surface_mapper.SetScalarRange(lo, hi)
+            # keep glyph/streamline speed ranges in sync
+            self._sync_speed_ranges()
 
         if render:
             self.renderer.GetRenderWindow().Render()
@@ -309,6 +311,10 @@ class VTKPipeline:
         self.glyph_actor = None
         self.contour_actor = None
         self.streamline_actor = None
+        self._riverbed_actor = None
+        self._surface_mapper = None
+        self._glyph_mapper = None
+        self._streamline_mapper = None
         self.obstacle_actors.clear()
         self.scalar_bar = None
         self.corner_annotation = None
@@ -350,44 +356,85 @@ class VTKPipeline:
                 elif lo == hi:
                     hi = lo + 1.0
                 self.scalar_ranges[name] = (lo, hi)
+        # Propagate speed range to glyph/streamline mappers
+        self._sync_speed_ranges()
+
+    def _sync_speed_ranges(self):
+        """Push the current speed range to glyph and streamline mappers."""
+        lo, hi = self.scalar_ranges["speed"]
+        if hasattr(self, "_glyph_mapper") and self._glyph_mapper:
+            self._glyph_mapper.SetScalarRange(lo, hi)
+        if hasattr(self, "_streamline_mapper") and self._streamline_mapper:
+            self._streamline_mapper.SetScalarRange(lo, hi)
 
     # ---- colour maps ------------------------------------------------- #
     def _build_color_maps(self):
         self.ctfs = {}
 
-        # height – blue gradient
+        # height – deep blue (deep) → turquoise → light cyan (shallow peak)
         ctf_h = vtk.vtkColorTransferFunction()
-        ctf_h.AddRGBPoint(0.0, 0.05, 0.05, 0.40)
-        ctf_h.AddRGBPoint(0.25, 0.10, 0.20, 0.70)
-        ctf_h.AddRGBPoint(0.50, 0.15, 0.45, 0.90)
-        ctf_h.AddRGBPoint(0.75, 0.30, 0.70, 1.00)
-        ctf_h.AddRGBPoint(1.0, 0.60, 0.90, 1.00)
+        ctf_h.SetColorSpaceToLab()
+        ctf_h.AddRGBPoint(0.0,  0.02, 0.08, 0.30)   # dark navy
+        ctf_h.AddRGBPoint(0.25, 0.04, 0.18, 0.52)   # ocean blue
+        ctf_h.AddRGBPoint(0.50, 0.06, 0.38, 0.66)   # medium blue
+        ctf_h.AddRGBPoint(0.70, 0.10, 0.58, 0.74)   # teal
+        ctf_h.AddRGBPoint(0.85, 0.25, 0.72, 0.82)   # turquoise
+        ctf_h.AddRGBPoint(1.0,  0.55, 0.88, 0.94)   # light cyan
         self.ctfs["h"] = ctf_h
 
-        # speed – blue -> yellow -> red
+        # speed – dark blue (still) → cyan → green → yellow → red (fast)
         ctf_s = vtk.vtkColorTransferFunction()
-        ctf_s.AddRGBPoint(0.0, 0.10, 0.10, 0.80)
-        ctf_s.AddRGBPoint(0.4, 0.10, 0.70, 0.90)
-        ctf_s.AddRGBPoint(0.7, 1.00, 0.90, 0.20)
-        ctf_s.AddRGBPoint(1.0, 0.90, 0.10, 0.10)
+        ctf_s.SetColorSpaceToLab()
+        ctf_s.AddRGBPoint(0.0,  0.05, 0.10, 0.50)   # dark blue (still)
+        ctf_s.AddRGBPoint(0.20, 0.08, 0.40, 0.70)   # blue
+        ctf_s.AddRGBPoint(0.40, 0.10, 0.65, 0.60)   # teal-green
+        ctf_s.AddRGBPoint(0.60, 0.40, 0.80, 0.20)   # green-yellow
+        ctf_s.AddRGBPoint(0.80, 0.90, 0.75, 0.10)   # yellow
+        ctf_s.AddRGBPoint(1.0,  0.85, 0.15, 0.08)   # red (fast)
         self.ctfs["speed"] = ctf_s
 
         # vorticity – diverging blue-white-red
         ctf_v = vtk.vtkColorTransferFunction()
         ctf_v.SetColorSpaceToDiverging()
         ctf_v.AddRGBPoint(-10.0, 0.231, 0.298, 0.753)
-        ctf_v.AddRGBPoint(0.0, 0.865, 0.865, 0.865)
-        ctf_v.AddRGBPoint(10.0, 0.706, 0.016, 0.150)
+        ctf_v.AddRGBPoint(0.0,   0.865, 0.865, 0.865)
+        ctf_v.AddRGBPoint(10.0,  0.706, 0.016, 0.150)
         self.ctfs["vorticity"] = ctf_v
 
     # ---- pipeline construction --------------------------------------- #
     def _build_pipeline(self):
         self.clear()
+        self._build_riverbed()
         self._build_surface()
         self._build_glyphs()
         self._build_contours()
         self._build_streamlines()
         self._build_scalar_bar()
+        self._setup_lighting()
+
+    def _build_riverbed(self):
+        """Flat textured plane at z=0 to give spatial context."""
+        w = self.config.domain_width
+        h = self.config.domain_height
+        plane = vtk.vtkPlaneSource()
+        plane.SetOrigin(0, 0, -0.01)
+        plane.SetPoint1(w, 0, -0.01)
+        plane.SetPoint2(0, h, -0.01)
+        plane.SetXResolution(1)
+        plane.SetYResolution(1)
+        plane.Update()
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(plane.GetOutputPort())
+
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(0.58, 0.50, 0.36)   # sandy brown
+        actor.GetProperty().SetAmbient(0.4)
+        actor.GetProperty().SetDiffuse(0.6)
+
+        self.renderer.AddActor(actor)
+        self._riverbed_actor = actor
 
     def _build_surface(self):
         geom = vtk.vtkImageDataGeometryFilter()
@@ -397,8 +444,13 @@ class VTKPipeline:
         warp.SetInputConnection(geom.GetOutputPort())
         warp.SetScaleFactor(self.config.warp_scale)
 
+        # Normals for proper specular highlights (water sheen)
+        normals = vtk.vtkPolyDataNormals()
+        normals.SetInputConnection(warp.GetOutputPort())
+        normals.SetFeatureAngle(60.0)
+
         mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputConnection(warp.GetOutputPort())
+        mapper.SetInputConnection(normals.GetOutputPort())
         mapper.SetScalarModeToUsePointFieldData()
         mapper.SelectColorArray(self.active_field)
         lo, hi = self.scalar_ranges[self.active_field]
@@ -407,7 +459,13 @@ class VTKPipeline:
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
-        actor.GetProperty().SetOpacity(0.75)
+        prop = actor.GetProperty()
+        prop.SetOpacity(0.88)
+        prop.SetSpecular(0.35)
+        prop.SetSpecularPower(40)
+        prop.SetSpecularColor(1.0, 1.0, 1.0)
+        prop.SetDiffuse(0.7)
+        prop.SetAmbient(0.15)
         actor.SetVisibility(self.show_surface)
 
         self.renderer.AddActor(actor)
@@ -448,18 +506,21 @@ class VTKPipeline:
 
         mapper = vtk.vtkPolyDataMapper()
         mapper.SetInputConnection(glyph.GetOutputPort())
-        mapper.ScalarVisibilityOff()
+        # Color arrows by speed so they show flow intensity
+        mapper.SetScalarModeToUsePointFieldData()
+        mapper.SelectColorArray("speed")
+        lo, hi = self.scalar_ranges["speed"]
+        mapper.SetScalarRange(lo, hi)
+        mapper.SetLookupTable(self.ctfs["speed"])
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
-        if self._is_live:
-            actor.GetProperty().SetColor(0.95, 0.95, 0.95)
-        else:
-            actor.GetProperty().SetColor(0.15, 0.15, 0.15)
+        actor.GetProperty().SetOpacity(0.9)
         actor.SetVisibility(self.show_glyphs)
 
         self.renderer.AddActor(actor)
         self.glyph_actor = actor
+        self._glyph_mapper = mapper
 
     def _build_contours(self):
         contour = vtk.vtkContourFilter()
@@ -488,7 +549,7 @@ class VTKPipeline:
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
-        actor.GetProperty().SetOpacity(1.0 if self._is_live else 0.9)
+        actor.GetProperty().SetOpacity(0.85 if self._is_live else 0.75)
         actor.SetVisibility(self.show_contours)
 
         self.renderer.AddActor(actor)
@@ -529,16 +590,21 @@ class VTKPipeline:
 
         mapper = vtk.vtkPolyDataMapper()
         mapper.SetInputConnection(tube.GetOutputPort())
-        mapper.ScalarVisibilityOff()
+        # Color streamlines by speed to show flow acceleration
+        mapper.SetScalarModeToUsePointFieldData()
+        mapper.SelectColorArray("speed")
+        lo, hi = self.scalar_ranges["speed"]
+        mapper.SetScalarRange(lo, hi)
+        mapper.SetLookupTable(self.ctfs["speed"])
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
-        actor.GetProperty().SetColor(0.95, 0.95, 0.95)
-        actor.GetProperty().SetOpacity(0.95 if self._is_live else 0.8)
+        actor.GetProperty().SetOpacity(0.85 if self._is_live else 0.75)
         actor.SetVisibility(self.show_streamlines)
 
         self.renderer.AddActor(actor)
         self.streamline_actor = actor
+        self._streamline_mapper = mapper
 
     def _build_scalar_bar(self):
         bar = vtk.vtkScalarBarActor()
@@ -562,13 +628,42 @@ class VTKPipeline:
             self.renderer.AddActor(actor)
             self.obstacle_actors.append(actor)
 
+    # ---- lighting ---------------------------------------------------- #
+    def _setup_lighting(self):
+        """Add a key light and fill light for realistic water sheen."""
+        self.renderer.RemoveAllLights()
+
+        # Key light — high angle from upstream-right, warm white
+        key = vtk.vtkLight()
+        key.SetLightTypeToSceneLight()
+        w = self.config.domain_width
+        h = self.config.domain_height
+        key.SetPosition(w * 0.3, -h * 0.5, h * 2.0)
+        key.SetFocalPoint(w / 2, h / 2, 0)
+        key.SetColor(1.0, 0.98, 0.94)
+        key.SetIntensity(1.0)
+        self.renderer.AddLight(key)
+
+        # Fill light — soft from opposite side, cool tint
+        fill = vtk.vtkLight()
+        fill.SetLightTypeToSceneLight()
+        fill.SetPosition(w * 0.8, h * 1.5, h * 0.8)
+        fill.SetFocalPoint(w / 2, h / 2, 0)
+        fill.SetColor(0.85, 0.90, 1.0)
+        fill.SetIntensity(0.4)
+        self.renderer.AddLight(fill)
+
     # ---- camera ------------------------------------------------------ #
     def _setup_camera(self):
         w = self.config.domain_width
         h = self.config.domain_height
         cam = self.renderer.GetActiveCamera()
-        cam.SetPosition(w / 2, -h * 0.6, h * 1.2)
-        cam.SetFocalPoint(w / 2, h / 2, 0)
+        # View from slightly upstream, elevated — like standing on a bridge
+        cam.SetPosition(w * 0.25, -h * 0.7, h * 1.1)
+        cam.SetFocalPoint(w * 0.55, h / 2, 0)
         cam.SetViewUp(0, 0, 1)
         self.renderer.ResetCamera()
-        self.renderer.SetBackground(0.15, 0.15, 0.20)
+        # Gradient background: dark blue-grey at bottom, lighter at top
+        self.renderer.SetBackground(0.12, 0.14, 0.22)
+        self.renderer.SetBackground2(0.28, 0.35, 0.50)
+        self.renderer.GradientBackgroundOn()

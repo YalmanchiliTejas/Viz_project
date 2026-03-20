@@ -10,8 +10,8 @@ class SimConfig:
     dx: float = 0.039
     dy: float = 0.039
     h0: float = 0.5
-    u0: float = 0.5
-    nu: float = 0.001
+    u0: float = 1.0
+    nu: float = 0.0005
     g: float = 9.81
     dt: float = 0.002
     export_interval: float = 0.1
@@ -64,6 +64,7 @@ PRECONFIGURED_OBSTACLES = [
     ObstacleDef("Small Rock",  "rock", radius=0.4,  height=0.20),
     ObstacleDef("Medium Rock", "rock", radius=0.7,  height=0.30),
     ObstacleDef("Large Rock",  "rock", radius=1.0,  height=0.40),
+    ObstacleDef("Boulder",     "rock", radius=1.5,  height=0.40),
     ObstacleDef("Small Log",   "log",  radius=0.15, height=0.40, length=1.5),
     ObstacleDef("Large Log",   "log",  radius=0.20, height=0.50, length=3.0),
 ]

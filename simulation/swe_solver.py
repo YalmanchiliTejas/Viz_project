@@ -1,16 +1,23 @@
 """
 Shallow Water Equations solver using Taichi.
 
-Uses a Lax-Friedrichs scheme with the η-gradient (water surface elevation)
-formulation.  This is naturally *well-balanced* – a lake-at-rest (u=v=0,
-η=h+b=const) is preserved exactly regardless of bed topography.
+Uses a *partial* Lax-Friedrichs scheme with the η-gradient (water surface
+elevation) formulation.  This is naturally *well-balanced* – a lake-at-rest
+(u=v=0, η=h+b=const) is preserved exactly regardless of bed topography.
 
 The momentum equation:
     ∂(hu)/∂t + ∂(hu²/h)/∂x + g h ∂η/∂x + ∂(huv/h)/∂y = 0
     where  η = h + b  (water surface elevation)
 
-By computing the combined pressure+source as  g h ∂η/∂x , there is no
-separate bed-slope source term and no cancellation error.
+Standard Lax-Friedrichs replaces the centre value with the full neighbour
+average, which is very stable but introduces huge numerical diffusion that
+kills vortices.  We use a *partial* average:
+
+    q_avg = (1 − α) · q_centre  +  α · ¼(q_e + q_w + q_n + q_s)
+
+With α < 1 the numerical diffusion is reduced by factor α, allowing wake
+vortices and recirculation zones to survive.  Stability requires
+  c_max · dt / dx  ≤  √(α / 2)     (2-D CFL for partial L-F)
 
 Supports both CPU and GPU backends via Taichi.
 """
@@ -20,7 +27,11 @@ import numpy as np
 # Cells with depth below this are treated as dry (zero state)
 DRY_THRESH = 1e-3
 # Hard cap on velocity magnitude (m/s)
-MAX_SPEED = 3.0
+MAX_SPEED = 4.0
+# Lax-Friedrichs blending factor (1.0 = full L-F, lower = less diffusion)
+# CFL stability limit: c_max*dt/dx ≤ sqrt(LF_ALPHA/2)
+# With MAX_SPEED=4, h0=0.5: c_max≈6.2, dt=0.002, dx=0.039 → 0.318, √(0.4/2)=0.447 ✓
+LF_ALPHA = 0.4
 
 
 def init_taichi(use_gpu: bool = False) -> str:
@@ -175,10 +186,17 @@ class SWESolver:
             v_n = self._safe_vel(hv_n, h_n)
             v_s = self._safe_vel(hv_s, h_s)
 
-            # ---------- Lax-Friedrichs average (numerical diffusion) -- #
-            h_avg  = 0.25 * (h_e + h_w + h_n + h_s)
-            hu_avg = 0.25 * (hu_e + hu_w + hu_n + hu_s)
-            hv_avg = 0.25 * (hv_e + hv_w + hv_n + hv_s)
+            # ---------- Partial Lax-Friedrichs average ----------------- #
+            # Blend centre value with neighbour average to control
+            # numerical diffusion.  alpha=1 is pure L-F (max diffusion),
+            # alpha<1 preserves more of the centre → sharper vortices.
+            alpha = LF_ALPHA
+            nbr_h  = 0.25 * (h_e + h_w + h_n + h_s)
+            nbr_hu = 0.25 * (hu_e + hu_w + hu_n + hu_s)
+            nbr_hv = 0.25 * (hv_e + hv_w + hv_n + hv_s)
+            h_avg  = (1.0 - alpha) * h_c  + alpha * nbr_h
+            hu_avg = (1.0 - alpha) * hu_c + alpha * nbr_hu
+            hv_avg = (1.0 - alpha) * hv_c + alpha * nbr_hv
 
             # ---------- mass flux (standard) -------------------------- #
             self.h_new[i, j] = h_avg \
