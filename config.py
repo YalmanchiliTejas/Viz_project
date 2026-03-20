@@ -18,6 +18,10 @@ class SimConfig:
     sim_time: float = 20.0
     use_gpu: bool = False
     warp_scale: float = 3.0
+    live_preview_nx: int = 128
+    live_preview_ny: int = 64
+    live_preview_max_fps: int = 8
+    live_preview_range_update_interval: int = 4
 
     @property
     def num_frames(self) -> int:

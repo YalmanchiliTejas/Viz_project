@@ -15,7 +15,7 @@ Supports two data modes:
 import os
 import numpy as np
 import vtk
-from vtk.util.numpy_support import numpy_to_vtk
+from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 from config import SimConfig, PlacedObstacle
 from simulation.obstacles import create_obstacle_actor
@@ -45,6 +45,9 @@ class VTKPipeline:
         self.reader = vtk.vtkXMLImageDataReader()
         self._live_image = None
         self._live_producer = None
+        self._live_arrays = {}
+        self._live_buffers = {}
+        self._live_frame_counter = 0
         self._source = self.reader          # current pipeline source
         self._is_live = False
 
@@ -55,6 +58,10 @@ class VTKPipeline:
         self.obstacle_actors: list = []
         self.scalar_bar = None
         self.corner_annotation = None
+        self._coordinate_picker = vtk.vtkWorldPointPicker()
+        self._coordinate_interactor = None
+        self._mouse_move_observer = None
+        self._last_coordinate_text = "X: --  Y: --"
 
         # color maps
         self._build_color_maps()
@@ -91,6 +98,7 @@ class VTKPipeline:
                         obstacles: list):
         """Switch pipeline to live data mode at the given resolution."""
         self._is_live = True
+        self._live_frame_counter = 0
 
         # Create an in-memory vtkImageData
         self._live_image = vtk.vtkImageData()
@@ -101,14 +109,24 @@ class VTKPipeline:
         # Seed with zeros so the pipeline has valid geometry
         pd = self._live_image.GetPointData()
         n = nx * ny
+        self._live_arrays = {}
+        self._live_buffers = {}
         for name in ("h", "vx", "vy", "speed", "vorticity", "pressure"):
-            a = numpy_to_vtk(np.full(n, self.config.h0 if name == "h" else 0.0,
-                                     dtype=np.float32), deep=True)
+            buffer = np.full(
+                n,
+                self.config.h0 if name == "h" else 0.0,
+                dtype=np.float32,
+            )
+            a = numpy_to_vtk(buffer, deep=True)
             a.SetName(name)
             pd.AddArray(a)
+            self._live_arrays[name] = a
+            self._live_buffers[name] = vtk_to_numpy(a)
         vec = numpy_to_vtk(np.zeros((n, 3), dtype=np.float32), deep=True)
         vec.SetName("velocity")
         pd.AddArray(vec)
+        self._live_arrays["velocity"] = vec
+        self._live_buffers["velocity"] = vtk_to_numpy(vec)
         pd.SetActiveScalars("h")
         pd.SetActiveVectors("velocity")
 
@@ -124,58 +142,63 @@ class VTKPipeline:
         self._add_obstacles(obstacles)
         self._setup_camera()
 
-    def update_live_frame(self, frame_data: dict):
-        """Push new solver output into the live image and re-render."""
+    def update_live_frame(self, frame_data: dict, render: bool = True):
+        """Push new solver output into the live image and optionally re-render."""
         if self._live_image is None:
             return
-        nx, ny, _ = self._live_image.GetDimensions()
-        pd = self._live_image.GetPointData()
 
         for name in ("h", "vx", "vy", "speed", "vorticity", "pressure"):
-            arr = numpy_to_vtk(
-                frame_data[name].flatten(order="F").astype(np.float32),
-                deep=True)
-            arr.SetName(name)
-            pd.RemoveArray(name)
-            pd.AddArray(arr)
+            np.copyto(
+                self._live_buffers[name],
+                frame_data[name].flatten(order="F").astype(np.float32, copy=False),
+            )
+            self._live_arrays[name].Modified()
 
         vx = frame_data["vx"].flatten(order="F").astype(np.float32)
         vy = frame_data["vy"].flatten(order="F").astype(np.float32)
-        vz = np.zeros_like(vx)
-        vec = numpy_to_vtk(np.column_stack([vx, vy, vz]), deep=True)
-        vec.SetName("velocity")
-        pd.RemoveArray("velocity")
-        pd.AddArray(vec)
+        velocity = self._live_buffers["velocity"]
+        velocity[:, 0] = vx
+        velocity[:, 1] = vy
+        velocity[:, 2] = 0.0
+        self._live_arrays["velocity"].Modified()
 
+        pd = self._live_image.GetPointData()
         pd.SetActiveScalars("h")
         pd.SetActiveVectors("velocity")
         self._live_image.Modified()
 
-        # Adaptive range update — expand ranges to fit data
-        for name in self.SCALAR_FIELDS:
-            a = pd.GetArray(name)
-            if a:
-                lo_d, hi_d = a.GetRange()
-                lo_c, hi_c = self.scalar_ranges[name]
-                if name == "vorticity":
-                    mx = max(abs(lo_d), abs(hi_d), abs(lo_c), abs(hi_c), 0.1)
-                    self.scalar_ranges[name] = (-mx, mx)
-                else:
-                    self.scalar_ranges[name] = (min(lo_c, lo_d),
-                                                max(hi_c, hi_d))
+        self._live_frame_counter += 1
+        if (self._live_frame_counter %
+                max(1, self.config.live_preview_range_update_interval) == 0):
+            # Adaptive range update — expand ranges to fit data
+            for name in self.SCALAR_FIELDS:
+                a = pd.GetArray(name)
+                if a:
+                    lo_d, hi_d = a.GetRange()
+                    lo_c, hi_c = self.scalar_ranges[name]
+                    if name == "vorticity":
+                        mx = max(abs(lo_d), abs(hi_d), abs(lo_c), abs(hi_c), 0.1)
+                        self.scalar_ranges[name] = (-mx, mx)
+                    else:
+                        self.scalar_ranges[name] = (min(lo_c, lo_d),
+                                                    max(hi_c, hi_d))
 
-        # apply updated range to mapper
-        if hasattr(self, "_surface_mapper"):
-            lo, hi = self.scalar_ranges[self.active_field]
-            self._surface_mapper.SetScalarRange(lo, hi)
+            # apply updated range to mapper
+            if hasattr(self, "_surface_mapper"):
+                lo, hi = self.scalar_ranges[self.active_field]
+                self._surface_mapper.SetScalarRange(lo, hi)
 
-        self.renderer.GetRenderWindow().Render()
+        if render:
+            self.renderer.GetRenderWindow().Render()
 
     def stop_live_mode(self):
         """Tear down the live pipeline."""
         self._is_live = False
         self._live_image = None
         self._live_producer = None
+        self._live_arrays = {}
+        self._live_buffers = {}
+        self._live_frame_counter = 0
         self._source = self.reader
         self.clear()
 
@@ -217,23 +240,33 @@ class VTKPipeline:
 
     def setup_coordinate_display(self, interactor):
         """Add a corner annotation that tracks mouse world coordinates."""
-        self.corner_annotation = vtk.vtkCornerAnnotation()
-        self.corner_annotation.SetText(2, "X: --  Y: --")
-        self.corner_annotation.GetTextProperty().SetFontSize(14)
-        self.corner_annotation.GetTextProperty().SetColor(1, 1, 1)
-        self.renderer.AddViewProp(self.corner_annotation)
+        if self.corner_annotation is None:
+            self.corner_annotation = vtk.vtkCornerAnnotation()
+            self.corner_annotation.SetText(2, self._last_coordinate_text)
+            self.corner_annotation.GetTextProperty().SetFontSize(14)
+            self.corner_annotation.GetTextProperty().SetColor(1, 1, 1)
+            self.renderer.AddViewProp(self.corner_annotation)
 
-        picker = vtk.vtkWorldPointPicker()
+        if self._coordinate_interactor is interactor and self._mouse_move_observer is not None:
+            return
+
+        if self._coordinate_interactor and self._mouse_move_observer is not None:
+            self._coordinate_interactor.RemoveObserver(self._mouse_move_observer)
 
         def _on_mouse_move(obj, event):
             x, y = interactor.GetEventPosition()
-            picker.Pick(x, y, 0, self.renderer)
-            pos = picker.GetPickPosition()
-            self.corner_annotation.SetText(
-                2, f"X: {pos[0]:.2f} m   Y: {pos[1]:.2f} m")
+            self._coordinate_picker.Pick(x, y, 0, self.renderer)
+            pos = self._coordinate_picker.GetPickPosition()
+            text = f"X: {pos[0]:.2f} m   Y: {pos[1]:.2f} m"
+            if text == self._last_coordinate_text:
+                return
+            self._last_coordinate_text = text
+            self.corner_annotation.SetText(2, text)
             interactor.GetRenderWindow().Render()
 
-        interactor.AddObserver("MouseMoveEvent", _on_mouse_move)
+        self._coordinate_interactor = interactor
+        self._mouse_move_observer = interactor.AddObserver(
+            "MouseMoveEvent", _on_mouse_move)
 
     def clear(self):
         """Remove all actors from the renderer."""
@@ -352,7 +385,8 @@ class VTKPipeline:
     def _build_glyphs(self):
         sub = vtk.vtkExtractVOI()
         sub.SetInputConnection(self._get_source_port())
-        sub.SetSampleRate(16, 16, 1)
+        sample_rate = 24 if self._is_live else 16
+        sub.SetSampleRate(sample_rate, sample_rate, 1)
 
         geom = vtk.vtkImageDataGeometryFilter()
         geom.SetInputConnection(sub.GetOutputPort())
@@ -397,7 +431,7 @@ class VTKPipeline:
         contour.SetInputArrayToProcess(
             0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, "vorticity")
         lo, hi = self.scalar_ranges["vorticity"]
-        contour.GenerateValues(12, lo, hi)
+        contour.GenerateValues(8 if self._is_live else 12, lo, hi)
 
         z_offset = self.config.h0 * self.config.warp_scale + 0.15
         transform = vtk.vtkTransform()
