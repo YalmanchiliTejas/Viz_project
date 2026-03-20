@@ -352,8 +352,7 @@ class VTKPipeline:
         self._build_surface()
         self._build_glyphs()
         self._build_contours()
-        if not self._is_live:
-            self._build_streamlines()
+        self._build_streamlines()
         self._build_scalar_bar()
 
     def _build_surface(self):
@@ -410,7 +409,7 @@ class VTKPipeline:
         glyph.SetSourceConnection(arrow.GetOutputPort())
         glyph.SetVectorModeToUseVector()
         glyph.SetScaleModeToScaleByVector()
-        glyph.SetScaleFactor(0.4)
+        glyph.SetScaleFactor(0.7 if self._is_live else 0.4)
         glyph.OrientOn()
 
         mapper = vtk.vtkPolyDataMapper()
@@ -419,7 +418,10 @@ class VTKPipeline:
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
-        actor.GetProperty().SetColor(0.15, 0.15, 0.15)
+        if self._is_live:
+            actor.GetProperty().SetColor(0.95, 0.95, 0.95)
+        else:
+            actor.GetProperty().SetColor(0.15, 0.15, 0.15)
         actor.SetVisibility(self.show_glyphs)
 
         self.renderer.AddActor(actor)
@@ -442,7 +444,7 @@ class VTKPipeline:
 
         tube = vtk.vtkTubeFilter()
         tube.SetInputConnection(tf.GetOutputPort())
-        tube.SetRadius(0.02)
+        tube.SetRadius(0.035 if self._is_live else 0.02)
         tube.SetNumberOfSides(6)
 
         mapper = vtk.vtkPolyDataMapper()
@@ -452,6 +454,7 @@ class VTKPipeline:
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
+        actor.GetProperty().SetOpacity(1.0 if self._is_live else 0.9)
         actor.SetVisibility(self.show_contours)
 
         self.renderer.AddActor(actor)
@@ -467,15 +470,16 @@ class VTKPipeline:
         seeds.SetPoint1(self.config.dx * 2, self.config.dy * 5, 0)
         seeds.SetPoint2(self.config.dx * 2,
                         self.config.domain_height - self.config.dy * 5, 0)
-        seeds.SetResolution(20)
+        seeds.SetResolution(8 if self._is_live else 20)
 
         tracer = vtk.vtkStreamTracer()
         tracer.SetInputConnection(assign_v.GetOutputPort())
         tracer.SetSourceConnection(seeds.GetOutputPort())
-        tracer.SetMaximumPropagation(self.config.domain_width * 2)
+        tracer.SetMaximumPropagation(
+            self.config.domain_width if self._is_live else self.config.domain_width * 2)
         tracer.SetIntegrationDirectionToForward()
         tracer.SetIntegratorTypeToRungeKutta4()
-        tracer.SetMaximumNumberOfSteps(4000)
+        tracer.SetMaximumNumberOfSteps(1200 if self._is_live else 4000)
 
         z_offset = self.config.h0 * self.config.warp_scale + 0.25
         transform = vtk.vtkTransform()
@@ -486,7 +490,7 @@ class VTKPipeline:
 
         tube = vtk.vtkTubeFilter()
         tube.SetInputConnection(tf.GetOutputPort())
-        tube.SetRadius(0.025)
+        tube.SetRadius(0.035 if self._is_live else 0.025)
         tube.SetNumberOfSides(6)
 
         mapper = vtk.vtkPolyDataMapper()
@@ -496,7 +500,7 @@ class VTKPipeline:
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
         actor.GetProperty().SetColor(0.95, 0.95, 0.95)
-        actor.GetProperty().SetOpacity(0.8)
+        actor.GetProperty().SetOpacity(0.95 if self._is_live else 0.8)
         actor.SetVisibility(self.show_streamlines)
 
         self.renderer.AddActor(actor)

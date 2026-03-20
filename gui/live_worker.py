@@ -33,7 +33,11 @@ class LiveSimWorker(QThread):
             cfg = self.config
             backend = init_taichi(cfg.use_gpu)
             self.status.emit(
-                f"Live preview ({backend}) — {self.live_nx}×{self.live_ny}")
+                "Live preview "
+                f"({backend}) — {self.live_nx}×{self.live_ny}. "
+                "Showing low-resolution versions of the selected layers "
+                "before the full simulation runs."
+            )
 
             # Build bed at preview resolution
             live_cfg = SimConfig(
@@ -51,6 +55,7 @@ class LiveSimWorker(QThread):
             )
             solver.set_bed(b)
             solver.initialize()
+            self.frame_ready.emit(solver.get_frame_data())
 
             frame_interval = 1.0 / max(1, cfg.live_preview_max_fps)
             steps_per_display = max(1, int(frame_interval / cfg.dt))

@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
 
     def _start_live_preview(self):
         self._stop_live_preview()
+        self.sidebar.set_live_preview_mode(True)
 
         worker = LiveSimWorker(
             self.config,
@@ -112,6 +113,7 @@ class MainWindow(QMainWindow):
         )
         self.pipeline.setup_coordinate_display(
             self.vtk_widget.GetRenderWindow().GetInteractor())
+        self.vtk_widget.GetRenderWindow().Render()
 
         worker.frame_ready.connect(self._on_live_frame)
         worker.status.connect(self.sidebar.show_status)
@@ -125,6 +127,7 @@ class MainWindow(QMainWindow):
             self._live_worker.stop()
             self._live_worker.wait()
         self._live_worker = None
+        self.sidebar.set_live_preview_mode(False)
         self.pipeline.stop_live_mode()
 
     def _on_live_frame(self, frame_data):
