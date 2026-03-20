@@ -19,6 +19,7 @@ from visualization.vtk_pipeline import VTKPipeline
 from gui.sidebar_panel import SidebarPanel
 from gui.slider_panel import SliderPanel
 from gui.simulation_worker import SimulationWorker
+from gui.live_worker import LiveSimWorker
 
 
 class MainWindow(QMainWindow):
@@ -26,6 +27,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self._worker = None
+        self._live_worker = None
 
         self.setWindowTitle("CS 530 – River Hydraulics Visualization")
         self.resize(1400, 800)
@@ -66,6 +68,8 @@ class MainWindow(QMainWindow):
         self.sidebar.run_simulation.connect(self._on_run_simulation)
         self.sidebar.scalar_field_changed.connect(self.pipeline.set_scalar_field)
         self.sidebar.layer_toggled.connect(self.pipeline.set_layer_visibility)
+        self.sidebar.live_preview_toggled.connect(self._on_live_toggled)
+        self.sidebar.obstacles_changed.connect(self._on_obstacles_changed)
 
         self.slider_panel.frame_changed.connect(self._on_frame_changed)
 
@@ -76,11 +80,63 @@ class MainWindow(QMainWindow):
         self.vtk_widget.GetRenderWindow().Render()
 
     # ------------------------------------------------------------------ #
+    #  Live preview                                                       #
+    # ------------------------------------------------------------------ #
+    def _on_live_toggled(self, enabled: bool):
+        if enabled:
+            self._start_live_preview()
+        else:
+            self._stop_live_preview()
+
+    def _start_live_preview(self):
+        self._stop_live_preview()
+
+        worker = LiveSimWorker(
+            self.config,
+            self.sidebar.placed_obstacles,
+            parent=self,
+        )
+
+        # Set up the pipeline in live mode BEFORE starting the worker
+        self.pipeline.start_live_mode(
+            worker.live_nx, worker.live_ny,
+            worker.live_dx, worker.live_dy,
+            self.sidebar.placed_obstacles,
+        )
+        self.pipeline.setup_coordinate_display(
+            self.vtk_widget.GetRenderWindow().GetInteractor())
+
+        worker.frame_ready.connect(self._on_live_frame)
+        worker.status.connect(self.sidebar.show_status)
+        worker.start()
+        self._live_worker = worker
+
+    def _stop_live_preview(self):
+        if self._live_worker and self._live_worker.isRunning():
+            self._live_worker.stop()
+            self._live_worker.wait()
+        self._live_worker = None
+
+    def _on_live_frame(self, frame_data):
+        self.pipeline.update_live_frame(frame_data)
+
+    def _on_obstacles_changed(self):
+        """Restart live preview when obstacles are added/removed."""
+        if self.sidebar.chk_live.isChecked():
+            self._start_live_preview()
+
+    # ------------------------------------------------------------------ #
     #  Simulation lifecycle                                               #
     # ------------------------------------------------------------------ #
     def _on_run_simulation(self):
         if self._worker and self._worker.isRunning():
             return
+
+        # Stop live preview — Taichi can only have one active context
+        was_live = self.sidebar.chk_live.isChecked()
+        if was_live:
+            self.sidebar.chk_live.setChecked(False)  # triggers _stop_live_preview
+        self._stop_live_preview()
 
         self.sidebar.set_controls_enabled(False)
         self.slider_panel.set_enabled_all(False)
@@ -106,6 +162,8 @@ class MainWindow(QMainWindow):
 
         self.pipeline.load_simulation(
             data_dir, num_frames, self.sidebar.placed_obstacles)
+        self.pipeline.setup_coordinate_display(
+            self.vtk_widget.GetRenderWindow().GetInteractor())
 
         self.slider_panel.set_num_frames(num_frames, self.config.export_interval)
         self.slider_panel.set_enabled_all(True)
@@ -128,6 +186,7 @@ class MainWindow(QMainWindow):
     #  Cleanup                                                            #
     # ------------------------------------------------------------------ #
     def closeEvent(self, event):
+        self._stop_live_preview()
         if self._worker and self._worker.isRunning():
             self._worker.terminate()
             self._worker.wait()

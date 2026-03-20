@@ -22,6 +22,7 @@ class SidebarPanel(QWidget):
     layer_toggled = pyqtSignal(str, bool)          # (layer_name, visible)
     run_simulation = pyqtSignal()
     obstacles_changed = pyqtSignal()
+    live_preview_toggled = pyqtSignal(bool)
 
     def __init__(self, config: SimConfig, parent=None):
         super().__init__(parent)
@@ -74,6 +75,12 @@ class SidebarPanel(QWidget):
             cb.toggled.connect(lambda checked, n=name: self.layer_toggled.emit(n, checked))
             vbox.addWidget(cb)
             self._layer_checks[name] = cb
+
+        # live preview toggle
+        self.chk_live = QCheckBox("Live Preview (low-res)")
+        self.chk_live.setChecked(False)
+        self.chk_live.toggled.connect(self.live_preview_toggled.emit)
+        vbox.addWidget(self.chk_live)
 
         self._layout.addWidget(grp)
 

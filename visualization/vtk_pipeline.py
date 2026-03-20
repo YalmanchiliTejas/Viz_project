@@ -7,9 +7,15 @@ Builds four visualization layers on a shared vtkRenderer:
   3. Vorticity contours – iso-contour lines of vorticity
   4. Streamlines – seeded at the domain inlet
 Plus obstacle actors (rocks / logs).
+
+Supports two data modes:
+  - File mode:  reads pre-computed VTI frames from disk (playback)
+  - Live mode:  receives numpy arrays directly from a running solver
 """
 import os
+import numpy as np
 import vtk
+from vtk.util.numpy_support import numpy_to_vtk
 
 from config import SimConfig, PlacedObstacle
 from simulation.obstacles import create_obstacle_actor
@@ -37,6 +43,11 @@ class VTKPipeline:
 
         # VTK objects (populated by setup_pipeline)
         self.reader = vtk.vtkXMLImageDataReader()
+        self._live_image = None
+        self._live_producer = None
+        self._source = self.reader          # current pipeline source
+        self._is_live = False
+
         self.surface_actor = None
         self.glyph_actor = None
         self.contour_actor = None
@@ -52,11 +63,20 @@ class VTKPipeline:
                               "vorticity": (-10.0, 10.0)}
 
     # ------------------------------------------------------------------ #
+    #  Source abstraction                                                  #
+    # ------------------------------------------------------------------ #
+    def _get_source_port(self):
+        """Return the output port of the current data source."""
+        return self._source.GetOutputPort()
+
+    # ------------------------------------------------------------------ #
     #  Public API                                                         #
     # ------------------------------------------------------------------ #
     def load_simulation(self, data_dir: str, num_frames: int,
                         obstacles: list):
-        """Load a completed simulation and build the pipeline."""
+        """Load a completed simulation and build the pipeline (file mode)."""
+        self._is_live = False
+        self._source = self.reader
         self.data_dir = data_dir
         self.num_frames = num_frames
 
@@ -66,6 +86,100 @@ class VTKPipeline:
         self._add_obstacles(obstacles)
         self._setup_camera()
 
+    # ---- live preview ------------------------------------------------ #
+    def start_live_mode(self, nx: int, ny: int, dx: float, dy: float,
+                        obstacles: list):
+        """Switch pipeline to live data mode at the given resolution."""
+        self._is_live = True
+
+        # Create an in-memory vtkImageData
+        self._live_image = vtk.vtkImageData()
+        self._live_image.SetDimensions(nx, ny, 1)
+        self._live_image.SetSpacing(dx, dy, 1.0)
+        self._live_image.SetOrigin(0, 0, 0)
+
+        # Seed with zeros so the pipeline has valid geometry
+        pd = self._live_image.GetPointData()
+        n = nx * ny
+        for name in ("h", "vx", "vy", "speed", "vorticity", "pressure"):
+            a = numpy_to_vtk(np.full(n, self.config.h0 if name == "h" else 0.0,
+                                     dtype=np.float32), deep=True)
+            a.SetName(name)
+            pd.AddArray(a)
+        vec = numpy_to_vtk(np.zeros((n, 3), dtype=np.float32), deep=True)
+        vec.SetName("velocity")
+        pd.AddArray(vec)
+        pd.SetActiveScalars("h")
+        pd.SetActiveVectors("velocity")
+
+        self._live_producer = vtk.vtkTrivialProducer()
+        self._live_producer.SetOutput(self._live_image)
+        self._source = self._live_producer
+
+        # Reasonable default ranges for live mode
+        self.scalar_ranges = {"h": (0.0, 1.0), "speed": (0.0, 2.0),
+                              "vorticity": (-10.0, 10.0)}
+
+        self._build_pipeline()
+        self._add_obstacles(obstacles)
+        self._setup_camera()
+
+    def update_live_frame(self, frame_data: dict):
+        """Push new solver output into the live image and re-render."""
+        if self._live_image is None:
+            return
+        nx, ny, _ = self._live_image.GetDimensions()
+        pd = self._live_image.GetPointData()
+
+        for name in ("h", "vx", "vy", "speed", "vorticity", "pressure"):
+            arr = numpy_to_vtk(
+                frame_data[name].flatten(order="F").astype(np.float32),
+                deep=True)
+            arr.SetName(name)
+            pd.RemoveArray(name)
+            pd.AddArray(arr)
+
+        vx = frame_data["vx"].flatten(order="F").astype(np.float32)
+        vy = frame_data["vy"].flatten(order="F").astype(np.float32)
+        vz = np.zeros_like(vx)
+        vec = numpy_to_vtk(np.column_stack([vx, vy, vz]), deep=True)
+        vec.SetName("velocity")
+        pd.RemoveArray("velocity")
+        pd.AddArray(vec)
+
+        pd.SetActiveScalars("h")
+        pd.SetActiveVectors("velocity")
+        self._live_image.Modified()
+
+        # Adaptive range update — expand ranges to fit data
+        for name in self.SCALAR_FIELDS:
+            a = pd.GetArray(name)
+            if a:
+                lo_d, hi_d = a.GetRange()
+                lo_c, hi_c = self.scalar_ranges[name]
+                if name == "vorticity":
+                    mx = max(abs(lo_d), abs(hi_d), abs(lo_c), abs(hi_c), 0.1)
+                    self.scalar_ranges[name] = (-mx, mx)
+                else:
+                    self.scalar_ranges[name] = (min(lo_c, lo_d),
+                                                max(hi_c, hi_d))
+
+        # apply updated range to mapper
+        if hasattr(self, "_surface_mapper"):
+            lo, hi = self.scalar_ranges[self.active_field]
+            self._surface_mapper.SetScalarRange(lo, hi)
+
+        self.renderer.GetRenderWindow().Render()
+
+    def stop_live_mode(self):
+        """Tear down the live pipeline."""
+        self._is_live = False
+        self._live_image = None
+        self._live_producer = None
+        self._source = self.reader
+        self.clear()
+
+    # ---- shared API -------------------------------------------------- #
     def set_frame(self, idx: int):
         """Switch the reader to a different time frame and re-render."""
         if not self._load_frame(idx):
@@ -78,6 +192,8 @@ class VTKPipeline:
         if field_name not in self.SCALAR_FIELDS:
             return
         self.active_field = field_name
+        if not hasattr(self, "_surface_mapper"):
+            return
         lo, hi = self.scalar_ranges[field_name]
         self._surface_mapper.SelectColorArray(field_name)
         self._surface_mapper.SetScalarRange(lo, hi)
@@ -150,7 +266,10 @@ class VTKPipeline:
 
     def _estimate_ranges(self):
         """Scan the first frame to set reasonable colour-map ranges."""
-        data = self.reader.GetOutput()
+        if self._is_live:
+            data = self._live_image
+        else:
+            data = self.reader.GetOutput()
         if not data:
             return
         pd = data.GetPointData()
@@ -178,7 +297,7 @@ class VTKPipeline:
         ctf_h.AddRGBPoint(1.0, 0.60, 0.90, 1.00)
         self.ctfs["h"] = ctf_h
 
-        # speed – blue → yellow → red
+        # speed – blue -> yellow -> red
         ctf_s = vtk.vtkColorTransferFunction()
         ctf_s.AddRGBPoint(0.0, 0.10, 0.10, 0.80)
         ctf_s.AddRGBPoint(0.4, 0.10, 0.70, 0.90)
@@ -200,12 +319,13 @@ class VTKPipeline:
         self._build_surface()
         self._build_glyphs()
         self._build_contours()
-        self._build_streamlines()
+        if not self._is_live:
+            self._build_streamlines()
         self._build_scalar_bar()
 
     def _build_surface(self):
         geom = vtk.vtkImageDataGeometryFilter()
-        geom.SetInputConnection(self.reader.GetOutputPort())
+        geom.SetInputConnection(self._get_source_port())
 
         warp = vtk.vtkWarpScalar()
         warp.SetInputConnection(geom.GetOutputPort())
@@ -231,7 +351,7 @@ class VTKPipeline:
 
     def _build_glyphs(self):
         sub = vtk.vtkExtractVOI()
-        sub.SetInputConnection(self.reader.GetOutputPort())
+        sub.SetInputConnection(self._get_source_port())
         sub.SetSampleRate(16, 16, 1)
 
         geom = vtk.vtkImageDataGeometryFilter()
@@ -241,7 +361,6 @@ class VTKPipeline:
         warp.SetInputConnection(geom.GetOutputPort())
         warp.SetScaleFactor(self.config.warp_scale)
 
-        # assign velocity as active vectors after warp (arrays propagate)
         assign_v = vtk.vtkAssignAttribute()
         assign_v.SetInputConnection(warp.GetOutputPort())
         assign_v.Assign("velocity", vtk.vtkDataSetAttributes.VECTORS,
@@ -274,13 +393,12 @@ class VTKPipeline:
 
     def _build_contours(self):
         contour = vtk.vtkContourFilter()
-        contour.SetInputConnection(self.reader.GetOutputPort())
+        contour.SetInputConnection(self._get_source_port())
         contour.SetInputArrayToProcess(
             0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_POINTS, "vorticity")
         lo, hi = self.scalar_ranges["vorticity"]
         contour.GenerateValues(12, lo, hi)
 
-        # elevate contours above surface
         z_offset = self.config.h0 * self.config.warp_scale + 0.15
         transform = vtk.vtkTransform()
         transform.Translate(0, 0, z_offset)
@@ -306,13 +424,11 @@ class VTKPipeline:
         self.contour_actor = actor
 
     def _build_streamlines(self):
-        # assign velocity vectors explicitly
         assign_v = vtk.vtkAssignAttribute()
-        assign_v.SetInputConnection(self.reader.GetOutputPort())
+        assign_v.SetInputConnection(self._get_source_port())
         assign_v.Assign("velocity", vtk.vtkDataSetAttributes.VECTORS,
                         vtk.vtkAssignAttribute.POINT_DATA)
 
-        # seed line along inlet (x ≈ 1 cell in)
         seeds = vtk.vtkLineSource()
         seeds.SetPoint1(self.config.dx * 2, self.config.dy * 5, 0)
         seeds.SetPoint2(self.config.dx * 2,
@@ -327,7 +443,6 @@ class VTKPipeline:
         tracer.SetIntegratorTypeToRungeKutta4()
         tracer.SetMaximumNumberOfSteps(4000)
 
-        # elevate above surface
         z_offset = self.config.h0 * self.config.warp_scale + 0.25
         transform = vtk.vtkTransform()
         transform.Translate(0, 0, z_offset)
