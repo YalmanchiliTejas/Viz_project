@@ -32,14 +32,25 @@ def init_taichi(use_gpu: bool = False) -> str:
 
     if use_gpu:
         try:
-            ti.init(arch=ti.gpu)
-            return "gpu"
+            ti.init(arch=ti.cuda)
+            return "cuda"
         except Exception:
             ti.init(arch=ti.cpu)
             return "cpu (GPU unavailable)"
     else:
         ti.init(arch=ti.cpu)
         return "cpu"
+
+
+def is_cuda_stream_error(exc: Exception) -> bool:
+    """Return True for common Taichi/CUDA stream synchronization failures."""
+    text = str(exc).lower()
+    return (
+        "stream_synchronize" in text
+        or "cuda" in text and "invalid" in text
+        or "cuda_error_invalid" in text
+        or "invalid resource handle" in text
+    )
 
 
 @ti.data_oriented

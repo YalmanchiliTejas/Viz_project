@@ -18,6 +18,12 @@ from config import SimConfig, ObstacleDef, PlacedObstacle, PRECONFIGURED_OBSTACL
 class SidebarPanel(QWidget):
     """Right-hand sidebar with display options, obstacle editor, sim controls."""
 
+    LIVE_PREVIEW_HINT = (
+        "Live preview shows low-resolution versions of the selected surface, "
+        "velocity arrows, vorticity contours, and streamlines before you run "
+        "the full simulation."
+    )
+
     scalar_field_changed = pyqtSignal(str)
     layer_toggled = pyqtSignal(str, bool)          # (layer_name, visible)
     run_simulation = pyqtSignal()
@@ -81,6 +87,12 @@ class SidebarPanel(QWidget):
         self.chk_live.setChecked(False)
         self.chk_live.toggled.connect(self.live_preview_toggled.emit)
         vbox.addWidget(self.chk_live)
+
+        self.lbl_live_hint = QLabel(
+            "Playback mode can show all layers, including streamlines.")
+        self.lbl_live_hint.setWordWrap(True)
+        self.lbl_live_hint.setStyleSheet("color: #b8c0cc; font-size: 11px;")
+        vbox.addWidget(self.lbl_live_hint)
 
         self._layout.addWidget(grp)
 
@@ -247,3 +259,11 @@ class SidebarPanel(QWidget):
         for w in (self.btn_add, self.btn_run, self.combo_backend,
                   self.combo_obstacle, self.edit_x, self.edit_y, self.tree):
             w.setEnabled(enabled)
+
+    def set_live_preview_mode(self, enabled: bool):
+        """Update display controls to match live-preview capabilities."""
+        if enabled:
+            self.lbl_live_hint.setText(self.LIVE_PREVIEW_HINT)
+        else:
+            self.lbl_live_hint.setText(
+                "Playback mode can show all layers, including streamlines.")

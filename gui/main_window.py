@@ -9,6 +9,7 @@ Layout:
   +-------------------------------------------------------+
 """
 import vtk
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QHBoxLayout,
                              QVBoxLayout, QMessageBox)
 
@@ -28,6 +29,12 @@ class MainWindow(QMainWindow):
         self.config = config
         self._worker = None
         self._live_worker = None
+        self._pending_live_frame = None
+
+        self._live_render_timer = QTimer(self)
+        self._live_render_timer.setSingleShot(True)
+        self._live_render_timer.setInterval(int(1000 / max(1, config.live_preview_max_fps)))
+        self._live_render_timer.timeout.connect(self._drain_live_frame)
 
         self.setWindowTitle("CS 530 – River Hydraulics Visualization")
         self.resize(1400, 800)
@@ -90,6 +97,7 @@ class MainWindow(QMainWindow):
 
     def _start_live_preview(self):
         self._stop_live_preview()
+        self.sidebar.set_live_preview_mode(True)
 
         worker = LiveSimWorker(
             self.config,
@@ -105,6 +113,7 @@ class MainWindow(QMainWindow):
         )
         self.pipeline.setup_coordinate_display(
             self.vtk_widget.GetRenderWindow().GetInteractor())
+        self.vtk_widget.GetRenderWindow().Render()
 
         worker.frame_ready.connect(self._on_live_frame)
         worker.status.connect(self.sidebar.show_status)
@@ -112,13 +121,30 @@ class MainWindow(QMainWindow):
         self._live_worker = worker
 
     def _stop_live_preview(self):
+        self._live_render_timer.stop()
+        self._pending_live_frame = None
         if self._live_worker and self._live_worker.isRunning():
             self._live_worker.stop()
             self._live_worker.wait()
         self._live_worker = None
+        self.sidebar.set_live_preview_mode(False)
+        self.pipeline.stop_live_mode()
 
     def _on_live_frame(self, frame_data):
-        self.pipeline.update_live_frame(frame_data)
+        self._pending_live_frame = frame_data
+        if not self._live_render_timer.isActive():
+            self._live_render_timer.start()
+
+    def _drain_live_frame(self):
+        if self._pending_live_frame is None:
+            return
+        frame_data = self._pending_live_frame
+        self._pending_live_frame = None
+        self.pipeline.update_live_frame(frame_data, render=False)
+        self.vtk_widget.GetRenderWindow().Render()
+
+        if self._pending_live_frame is not None:
+            self._live_render_timer.start()
 
     def _on_obstacles_changed(self):
         """Restart live preview when obstacles are added/removed."""
